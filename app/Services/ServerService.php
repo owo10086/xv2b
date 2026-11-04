@@ -222,7 +222,27 @@ class ServerService
         return $servers;
     }
 
-    public function getAvailableServers(User $user)
+    /**
+     * 节点标签里有一个去掉首尾空白（含全角空格）后正好是「客户端」，就是客户端节点，只发给自家客户端。
+     * 只认整个标签，「客户端A」「非客户端」之类不算；标签为空、缺失或不是列表时算公开节点。
+     * 所有节点出口都靠这一处判断。
+     */
+    public static function isClientOnly(array $server): bool
+    {
+        $tags = $server['tags'] ?? null;
+        if (!is_array($tags)) return false;
+        foreach ($tags as $tag) {
+            if (!is_string($tag)) continue;
+            // \x{3000} 是全角空格，中文输入法下按空格容易打出来
+            if (preg_replace('/^[\s\x{3000}]+|[\s\x{3000}]+$/u', '', $tag) === '客户端') return true;
+        }
+        return false;
+    }
+
+    /**
+     * 用户能用的全部节点。$includeClientOnly 由每个出口明确传入：发给第三方软件的出口必须传 false。
+     */
+    public function getAvailableServers(User $user, bool $includeClientOnly)
     {
         $servers = array_merge(
             $this->getAvailableShadowsocks($user),
@@ -234,6 +254,12 @@ class ServerService
             $this->getAvailableAnyTLS($user),
             $this->getAvailableV2node($user)
         );
+        if (!$includeClientOnly) {
+            // 重新从 0 连续编号：订阅里的信息节点复制的是第 0 个节点
+            $servers = array_values(array_filter($servers, function ($server) {
+                return !self::isClientOnly($server);
+            }));
+        }
         $tmp = array_column($servers, 'sort');
         array_multisort($tmp, SORT_ASC, $servers);
         return array_map(function ($server) {

@@ -19,7 +19,8 @@ class ServerController extends Controller
         $userService = new UserService();
         if ($userService->isAvailable($user)) {
             $serverService = new ServerService();
-            $servers = $serverService->getAvailableServers($user);
+            // 网页节点列表照常列出客户端节点，标签原样返回，用户能看出哪些要用客户端
+            $servers = $serverService->getAvailableServers($user, true);
         }
         $eTag = sha1(json_encode(array_column($servers, 'cache_key')));
         if (strpos($request->header('If-None-Match'), $eTag) !== false ) {
