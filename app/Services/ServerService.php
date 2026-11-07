@@ -223,23 +223,20 @@ class ServerService
     }
 
     /**
-     * 通过原有允许组筛选后，有完整「客户端」且没有完整「公开」标签的节点才属于专属节点。
-     * 标签去首尾空白（含全角空格）后完整比较；空、缺失或非列表标签算公开节点。
+     * 节点标签里有一个去掉首尾空白（含全角空格）后正好是「客户端」，就是客户端节点，只发给自家客户端。
+     * 只认整个标签，「客户端A」「非客户端」之类不算；标签为空、缺失或不是列表时算公开节点。
      * 所有节点出口都靠这一处判断。
      */
     public static function isClientOnly(array $server): bool
     {
         $tags = $server['tags'] ?? null;
-        if (!is_array($tags) || array_values($tags) !== $tags) return false;
-        $hasClientTag = false;
+        if (!is_array($tags)) return false;
         foreach ($tags as $tag) {
             if (!is_string($tag)) continue;
             // \x{3000} 是全角空格，中文输入法下按空格容易打出来
-            $tag = preg_replace('/^[\s\x{3000}]+|[\s\x{3000}]+$/u', '', $tag);
-            if ($tag === '公开') return false;
-            if ($tag === '客户端') $hasClientTag = true;
+            if (preg_replace('/^[\s\x{3000}]+|[\s\x{3000}]+$/u', '', $tag) === '客户端') return true;
         }
-        return $hasClientTag;
+        return false;
     }
 
     /**
