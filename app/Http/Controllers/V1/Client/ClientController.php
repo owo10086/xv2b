@@ -21,19 +21,21 @@ class ClientController extends Controller
             ?? ($_SERVER['HTTP_USER_AGENT'] ?? '');
         $flag = strtolower($flag);
         $user = $request->user;
-        $includeClientOnly = false;
+        $scope = ServerService::SCOPE_ORDINARY;
         $authorization = $request->input('auth_data') ?? $request->header('authorization');
         if ($authorization !== null) {
             $authUser = AuthService::decryptAuthData($authorization);
             if (!$authUser) abort(403, '未登录或登陆已过期');
             // 登录凭据只用来认出本人，套餐和权限仍由订阅令牌定位的完整用户记录决定。
-            $includeClientOnly = (int)$authUser['id'] === (int)$user->id;
+            $scope = (int)$authUser['id'] === (int)$user->id
+                ? ServerService::SCOPE_CLIENT
+                : ServerService::SCOPE_ORDINARY;
         }
         // 先判断可选登录凭据，再沿用账号未过期且未封禁的检查。
         $userService = new UserService();
         if ($userService->isAvailable($user)) {
             $serverService = new ServerService();
-            $servers = $serverService->getAvailableServers($user, $includeClientOnly);
+            $servers = $serverService->getAvailableServers($user, $scope);
             if($flag) {
                 if (!strpos($flag, 'sing')) {
                     $this->setSubscribeInfoToServers($servers, $user);

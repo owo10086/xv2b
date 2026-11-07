@@ -19,8 +19,8 @@ class ServerController extends Controller
         $userService = new UserService();
         if ($userService->isAvailable($user)) {
             $serverService = new ServerService();
-            // 网页节点列表照常列出客户端节点，标签原样返回，用户能看出哪些要用客户端
-            $servers = $serverService->getAvailableServers($user, true);
+            // 网页展示全部有权限的节点，保留原始标签。
+            $servers = $serverService->getAvailableServers($user, ServerService::SCOPE_ALL);
         }
         $eTag = sha1(json_encode(array_column($servers, 'cache_key')));
         if (strpos($request->header('If-None-Match'), $eTag) !== false ) {

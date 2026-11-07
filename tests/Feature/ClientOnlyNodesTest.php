@@ -14,8 +14,8 @@ use Symfony\Component\Yaml\Yaml;
 use Tests\TestCase;
 
 /**
- * 客户端专属节点：标签里有一个正好是「客户端」的节点只发给客户端，其余节点公开。
- * 三个节点出口：订阅下载按可选登录凭据下发；App 配置只发公开节点；网页节点列表包含全部。
+ * 节点渠道：仅「普通」只发普通订阅，仅「客户端」只发客户端订阅，双标签或无渠道标签共享。
+ * 三个节点出口：订阅下载按可选登录凭据选择渠道；旧 App 配置走普通渠道；网页节点列表包含全部。
  *
  * 用例连的是测试库，每个用例在事务里执行、结束后回滚。
  * 每个用例新建自己的权限组，库里已有的节点不会混进结果。
@@ -30,6 +30,8 @@ class ClientOnlyNodesTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        // 鉴权失败用例断言 JSON 错误响应，显式声明响应类型。
+        $this->withHeaders(['Accept' => 'application/json']);
         // 测试站点可能开着信息节点；只有专门验证它的用例才开启，避免设置影响节点断言。
         config(['v2board.show_info_to_server_enable' => 0]);
         $this->group = $this->makeGroup();
@@ -55,6 +57,80 @@ class ClientOnlyNodesTest extends TestCase
         $this->assertSame(
             [self::host('pub'), self::host('cli')],
             $this->subscribedHosts($user, $flag, ...$this->credentialOptions($auth, $location))
+        );
+    }
+
+    /** @dataProvider channelTags */
+    public function testChannelTagsControlSubscriptionAppAndWebOutputs($tags, bool $ordinary, bool $client)
+    {
+        $this->makeNode('target', $tags, 1);
+        $user = $this->makeUser();
+        $ordinaryHosts = $ordinary ? [self::host('target')] : [];
+        $clientHosts = $client ? [self::host('target')] : [];
+
+        $this->assertSame($ordinaryHosts, $this->subscribedHosts($user, 'meta'));
+        $this->assertSame(
+            $clientHosts,
+            $this->subscribedHosts($user, 'meta', ['Authorization' => $this->authData($user)])
+        );
+        $app = $this->get('/api/v1/client/app/getConfig?' . http_build_query(['token' => $user->token]));
+        $app->assertOk();
+        $this->assertSame($ordinaryHosts, array_column($this->clashProxies($app), 'server'));
+        $this->assertSame([['host' => self::host('target'), 'tags' => $tags]], $this->webNodes($user));
+    }
+
+    public static function channelTags(): array
+    {
+        return [
+            '普通专属' => [['普通'], true, false],
+            '客户端专属' => [['客户端'], false, true],
+            '双标签共享' => [['普通', '客户端'], true, true],
+            '双标签反序' => [['客户端', '普通'], true, true],
+            '空标签共享' => [[], true, true],
+            '缺失标签共享' => [null, true, true],
+            '展示标签共享' => [['香港', '高速'], true, true],
+            '普通首尾空白' => [[" \t普通\n"], true, false],
+            '客户端首尾空白' => [['　客户端　'], false, true],
+            '双标签首尾空白' => [['　普通　', " \t客户端\n"], true, true],
+            '普通重复' => [['普通', '普通'], true, false],
+            '客户端重复' => [['客户端', '客户端'], false, true],
+            '双标签重复' => [['香港', '普通', '客户端', '普通', '客户端'], true, true],
+            '近似标签共享' => [['普通A', '非普通', '客户端专用'], true, true],
+            '整段标签不拆分' => [['普通,客户端'], true, true],
+            '普通及整段标签' => [['普通', '普通,客户端'], true, false],
+            '客户端及整段标签' => [['客户端', '普通,客户端'], false, true],
+            '公开是展示标签' => [['公开'], true, true],
+            '公开不覆盖普通' => [['普通', '公开'], true, false],
+            '公开不覆盖客户端' => [['客户端', '公开'], false, true],
+            '非数组沿用共享' => ['普通', true, true],
+            '对象值普通沿用匹配' => [['label' => '普通'], true, false],
+            '对象值客户端沿用匹配' => [['label' => '客户端'], false, true],
+            '非字符串不影响普通' => [['普通', null, 6, false], true, false],
+            '非字符串不影响共享' => [['普通', null, 6, '客户端'], true, true],
+        ];
+    }
+
+    /** @dataProvider ownerFormatsAndCredentialLocations */
+    public function testChannelSelectionAcrossFormatsAndCredentials(string $flag, string $location)
+    {
+        $this->makeNode('shared', ['香港'], 1);
+        $this->makeNode('ordinary', ['普通'], 2);
+        $this->makeNode('client', ['客户端'], 3);
+        $this->makeNode('dual', ['客户端', '普通'], 4);
+        $owner = $this->makeUser();
+        $otherGroup = $this->makeGroup();
+        $this->makeNode('other', ['普通', '客户端'], 5, ['group_id' => [(string)$otherGroup->id]]);
+        $other = $this->makeUser(['group_id' => $otherGroup->id]);
+        $ordinaryHosts = [self::host('shared'), self::host('ordinary'), self::host('dual')];
+
+        $this->assertSame($ordinaryHosts, $this->subscribedHosts($owner, $flag));
+        $this->assertSame(
+            [self::host('shared'), self::host('client'), self::host('dual')],
+            $this->subscribedHosts($owner, $flag, ...$this->credentialOptions($this->authData($owner), $location))
+        );
+        $this->assertSame(
+            $ordinaryHosts,
+            $this->subscribedHosts($owner, $flag, ...$this->credentialOptions($this->authData($other), $location))
         );
     }
 
@@ -211,10 +287,44 @@ class ClientOnlyNodesTest extends TestCase
         );
     }
 
+    public function testOwnerInfoNodesSkipOrdinaryNodes()
+    {
+        config(['v2board.show_info_to_server_enable' => 1]);
+        $this->makeNode('ordinary-first', ['普通'], 1);
+        $this->makeNode('client-second', ['客户端'], 2);
+        $this->makeNode('shared-third', null, 3);
+        $user = $this->makeUser();
+        $response = $this->subscribe($user, 'meta', ['Authorization' => $this->authData($user)]);
+        $response->assertOk();
+        $proxies = $this->clashProxies($response);
+
+        $this->assertStringStartsWith('剩余流量：', $proxies[0]['name']);
+        $this->assertSame(
+            [self::host('client-second'), self::host('client-second'), self::host('client-second'), self::host('shared-third')],
+            array_column($proxies, 'server')
+        );
+    }
+
+    public function testNoOwnerInfoNodesWhenOnlyOrdinaryNodes()
+    {
+        config(['v2board.show_info_to_server_enable' => 1]);
+        $this->makeNode('ordinary-a', ['普通'], 1);
+        $this->makeNode('ordinary-b', ['普通', '香港'], 2);
+        $user = $this->makeUser();
+        $auth = $this->authData($user);
+
+        foreach (['meta', 'v2rayn', 'shadowrocket'] as $flag) {
+            $this->assertSame([], $this->subscribedHosts($user, $flag, ['Authorization' => $auth]), $flag);
+        }
+    }
+
     public function testAppConfigIgnoresOptionalLoginCredentials()
     {
         $this->makeNode('pub', null, 1);
         $this->makeNode('cli', ['客户端'], 2);
+        $this->makeNode('ordinary', ['普通'], 3);
+        $this->makeNode('dual', ['普通', '客户端'], 4);
+        $this->makeNode('unsupported', ['普通'], 5, ['cipher' => '2022-blake3-aes-128-gcm']);
         $user = $this->makeUser();
 
         foreach ([$this->authData($user), 'not.a.valid-credential'] as $auth) {
@@ -224,7 +334,10 @@ class ClientOnlyNodesTest extends TestCase
                 $response = $this->get('/api/v1/client/app/getConfig?' . $query, $headers);
                 $response->assertOk();
                 $config = Yaml::parse($response->getContent());
-                $this->assertSame([self::host('pub')], array_column($config['proxies'], 'server'));
+                $this->assertSame(
+                    [self::host('pub'), self::host('ordinary'), self::host('dual')],
+                    array_column($config['proxies'], 'server')
+                );
             }
         }
     }

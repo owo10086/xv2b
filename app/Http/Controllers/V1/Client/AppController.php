@@ -18,8 +18,8 @@ class AppController extends Controller
         $userService = new UserService();
         if ($userService->isAvailable($user)) {
             $serverService = new ServerService();
-            // 老式 App 配置只认订阅令牌，始终只给公开节点
-            $servers = $serverService->getAvailableServers($user, false);
+            // 旧 App 配置只认订阅令牌，沿用普通订阅渠道。
+            $servers = $serverService->getAvailableServers($user, ServerService::SCOPE_ORDINARY);
         }
         $defaultConfig = base_path() . '/resources/rules/app.clash.yaml';
         $customConfig = base_path() . '/resources/rules/custom.app.clash.yaml';

@@ -19,6 +19,10 @@ use Illuminate\Support\Facades\Cache;
 
 class ServerService
 {
+    public const SCOPE_ORDINARY = 'ordinary';
+    public const SCOPE_CLIENT = 'client';
+    public const SCOPE_ALL = 'all';
+
     public function getAvailableVless(User $user): array
     {
         $servers = [];
@@ -223,27 +227,36 @@ class ServerService
     }
 
     /**
-     * 节点标签里有一个去掉首尾空白（含全角空格）后正好是「客户端」，就是客户端节点，只发给自家客户端。
-     * 只认整个标签，「客户端A」「非客户端」之类不算；标签为空、缺失或不是列表时算公开节点。
-     * 所有节点出口都靠这一处判断。
+     * 根据渠道标签识别普通专属、客户端专属或共享节点。
+     * 完整匹配「普通」「客户端」；空、缺失或非数组标签按共享处理。
+     * 沿用数组值匹配，忽略非字符串项，不改写节点原始标签。
      */
-    public static function isClientOnly(array $server): bool
+    private static function getDeliveryScope(array $server): string
     {
         $tags = $server['tags'] ?? null;
-        if (!is_array($tags)) return false;
+        if (!is_array($tags)) return self::SCOPE_ALL;
+        $ordinary = false;
+        $client = false;
         foreach ($tags as $tag) {
             if (!is_string($tag)) continue;
             // \x{3000} 是全角空格，中文输入法下按空格容易打出来
-            if (preg_replace('/^[\s\x{3000}]+|[\s\x{3000}]+$/u', '', $tag) === '客户端') return true;
+            $tag = preg_replace('/^[\s\x{3000}]+|[\s\x{3000}]+$/u', '', $tag);
+            if ($tag === '普通') $ordinary = true;
+            if ($tag === '客户端') $client = true;
         }
-        return false;
+        // 双标签和无渠道标签均为共享节点，其他标签只用于展示。
+        if ($ordinary === $client) return self::SCOPE_ALL;
+        return $ordinary ? self::SCOPE_ORDINARY : self::SCOPE_CLIENT;
     }
 
     /**
-     * 用户能用的全部节点。$includeClientOnly 由每个出口明确传入：发给第三方软件的出口必须传 false。
+     * 用户有权限的节点。订阅出口明确选择普通或客户端渠道，网页列表选择全部。
      */
-    public function getAvailableServers(User $user, bool $includeClientOnly)
+    public function getAvailableServers(User $user, string $scope)
     {
+        if (!in_array($scope, [self::SCOPE_ORDINARY, self::SCOPE_CLIENT, self::SCOPE_ALL], true)) {
+            throw new \InvalidArgumentException('未知的节点下发范围');
+        }
         $servers = array_merge(
             $this->getAvailableShadowsocks($user),
             $this->getAvailableVmess($user),
@@ -254,10 +267,11 @@ class ServerService
             $this->getAvailableAnyTLS($user),
             $this->getAvailableV2node($user)
         );
-        if (!$includeClientOnly) {
+        if ($scope !== self::SCOPE_ALL) {
             // 重新从 0 连续编号：订阅里的信息节点复制的是第 0 个节点
-            $servers = array_values(array_filter($servers, function ($server) {
-                return !self::isClientOnly($server);
+            $servers = array_values(array_filter($servers, function ($server) use ($scope) {
+                $nodeScope = self::getDeliveryScope($server);
+                return $nodeScope === self::SCOPE_ALL || $nodeScope === $scope;
             }));
         }
         $tmp = array_column($servers, 'sort');
