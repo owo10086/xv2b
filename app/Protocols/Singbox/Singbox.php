@@ -358,6 +358,8 @@ class Singbox
 
     protected function buildAnyTLS($password, $server)
     {
+        // 原生 AnyTLS 表不包含通用传输/TLS字段，按已有默认 TLS/TCP 输出。
+        $server += ['tls' => 1, 'tls_settings' => [], 'network' => 'tcp', 'network_settings' => []];
         $array = [];
         $array['tag'] = $server['name'];
         $array['type'] = 'anytls';

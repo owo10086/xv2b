@@ -402,7 +402,8 @@ class Stash
             'port' => $server['port'],
             'password' => $password,
         ];
-        if ($server['tls']) {
+        // 原生 AnyTLS 记录没有 tls 字段，沿用该协议默认启用 TLS。
+        if ($server['tls'] ?? true) {
             $array['tls'] = true;
             $tlsSettings = $server['tls_settings'] ?? [];
             $array['client-fingerprint'] = !empty($tlsSettings['fingerprint']) ? $tlsSettings['fingerprint'] : 'chrome';

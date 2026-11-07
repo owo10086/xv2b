@@ -33,6 +33,7 @@ class ClientOnlyNodesTest extends TestCase
         // 测试站点可能开着信息节点；只有专门验证它的用例才开启，避免设置影响节点断言。
         config(['v2board.show_info_to_server_enable' => 0]);
         $this->group = $this->makeGroup();
+
     }
 
     public function testSubscribeWithoutCredentialsOmitsClientNodes()
@@ -389,6 +390,135 @@ class ClientOnlyNodesTest extends TestCase
         }
     }
 
+    /** @dataProvider nativeAnyTlsFormats */
+    public function testFormatsIncludeNativeAnyTlsDualTagNodeWithTls(string $flag)
+    {
+        $node = new \App\Models\ServerAnytls();
+        foreach ([
+            'name' => 'native-anytls-dual', 'host' => self::host('native-anytls-dual'),
+            'group_id' => [(string)$this->group->id], 'tags' => ['客户端', '公开'],
+            'rate' => '1', 'port' => '443', 'server_port' => 443, 'show' => 1, 'sort' => 1,
+        ] as $field => $value) $node->{$field} = $value;
+        $node->save();
+        // 格式器沿用原生 PHP 的 Host 环境；框架 HTTP 测试显式准备该前提。
+        $originalHost = $_SERVER['HTTP_HOST'] ?? null;
+        $_SERVER['HTTP_HOST'] = 'test.local';
+        try {
+            $response = $this->subscribe($this->makeUser(), $flag);
+        } finally {
+            if ($originalHost === null) unset($_SERVER['HTTP_HOST']);
+            else $_SERVER['HTTP_HOST'] = $originalHost;
+        }
+        $response->assertOk();
+        $proxies = $flag === 'stash' ? Yaml::parse($response->getContent())['proxies'] : array_values(array_filter(
+            json_decode($response->getContent(), true)['outbounds'], function ($node) { return isset($node['server']); }
+        ));
+        $this->assertCount(1, $proxies);
+        $this->assertSame('anytls', $proxies[0]['type']);
+        $this->assertSame(self::host('native-anytls-dual'), $proxies[0]['server']);
+        $this->assertTrue($flag === 'stash' ? $proxies[0]['tls'] : $proxies[0]['tls']['enabled']);
+    }
+
+    public static function nativeAnyTlsFormats(): array
+    {
+        return [['stash'], ['sing-box 1.12.0']];
+    }
+
+    /** @dataProvider actualAllowedGroups */
+    public function testDualTagsUseSubscriptionOwnerPermissionsForEveryCredential(int $groupId)
+    {
+        // 固定实际组编号，不能用组名或两个动态组替代 5/6 对照。
+        ServerShadowsocks::query()->update(['show' => 0]);
+        $this->group = ServerGroup::find($groupId) ?? $this->makeFixedGroup($groupId);
+        $this->makeNode('dual', ['客户端', '公开', '香港'], 1, ['group_id' => ['5', '6']]);
+        $this->makeNode('exclusive', ['客户端'], 2, ['group_id' => ['5', '6']]);
+        $this->makeNode('only6', ['客户端', '公开'], 3, ['group_id' => ['6']]);
+        $this->makeNode('hidden-dual', ['客户端', '公开'], 4, ['group_id' => ['5', '6'], 'show' => 0]);
+        $owner = $this->makeUser();
+        $other = $this->makeUser(['group_id' => $this->makeGroup()->id]);
+        $public = [self::host('dual')];
+        $all = [self::host('dual'), self::host('exclusive')];
+        if ($groupId === 6) {
+            $public[] = self::host('only6');
+            $all[] = self::host('only6');
+        }
+        foreach (['header', 'parameter'] as $location) {
+            $this->assertSame($public, $this->subscribedHosts($owner, 'meta'));
+            $this->assertSame($all, $this->subscribedHosts($owner, 'meta', ...$this->credentialOptions($this->authData($owner), $location)));
+            $this->assertSame($public, $this->subscribedHosts($owner, 'meta', ...$this->credentialOptions($this->authData($other), $location)));
+            $this->subscribe($owner, 'meta', ...$this->credentialOptions('not.a.valid-credential', $location))
+                ->assertStatus(403)->assertJsonPath('message', '未登录或登陆已过期');
+            $this->assertSame([], $this->subscribedHosts($other, 'meta', ...$this->credentialOptions($this->authData($owner), $location)));
+            $this->assertSame([], $this->subscribedHosts($other, 'meta', ...$this->credentialOptions($this->authData($other), $location)));
+        }
+        $this->assertSame($all, array_column($this->webNodes($owner), 'host'));
+    }
+
+    /** @dataProvider actualAllowedGroups */
+    public function testAppIncludesAuthorizedDualTagsWithoutExpandingCipherSupport(int $groupId)
+    {
+        ServerShadowsocks::query()->update(['show' => 0]);
+        $this->group = ServerGroup::find($groupId) ?? $this->makeFixedGroup($groupId);
+        $this->makeNode('dual', ['客户端', '公开'], 1, ['group_id' => ['5', '6']]);
+        $this->makeNode('exclusive', ['客户端'], 2, ['group_id' => ['5', '6']]);
+        $this->makeNode('unsupported-cipher', ['客户端', '公开'], 3, ['group_id' => ['5', '6'], 'cipher' => '2022-blake3-aes-128-gcm']);
+        $user = $this->makeUser();
+        $response = $this->get('/api/v1/client/app/getConfig?' . http_build_query(['token' => $user->token]));
+        $response->assertOk();
+        $this->assertSame([self::host('dual')], array_column($this->clashProxies($response), 'server'));
+        $this->assertSame(['客户端', '公开'], $this->webNodes($user)[0]['tags']);
+    }
+
+    /** @dataProvider publicPriorityTags */
+    public function testCompletePublicTagControlsBothSubscriptionAndApp($tags, bool $public)
+    {
+        $this->makeNode('target', $tags, 1);
+        $user = $this->makeUser();
+        $expected = $public ? [self::host('target')] : [];
+        $this->assertSame($expected, $this->subscribedHosts($user, 'meta'));
+        $response = $this->get('/api/v1/client/app/getConfig?' . http_build_query(['token' => $user->token]));
+        $response->assertOk();
+        $this->assertSame($expected, array_column($this->clashProxies($response), 'server'));
+        $this->assertSame([self::host('target')], $this->subscribedHosts($user, 'meta', ['Authorization' => $this->authData($user)]));
+        $this->assertSame($tags, $this->webNodes($user)[0]['tags']);
+    }
+
+    public static function actualAllowedGroups(): array
+    {
+        return ['组5' => [5], '组6' => [6]];
+    }
+
+    public static function publicPriorityTags(): array
+    {
+        return [
+            '双标签' => [['客户端', '公开'], true],
+            '反序' => [['公开', '客户端'], true],
+            '空白' => [[" \t客户端\n", '　公开　'], true],
+            '重复和共存' => [['香港', '客户端', '公开', '客户端', '公开', '高速'], true],
+            '仅公开' => [['公开'], true],
+            '空列表' => [[], true],
+            '缺失' => [null, true],
+            '非列表' => ['客户端', true],
+            '对象标签' => [['label' => '客户端'], true],
+            '近似公开' => [['客户端', '公开A'], false],
+            '公开前缀' => [['客户端', '非公开'], false],
+            '近似客户端' => [['客户端A', '公开A'], true],
+            '整段分隔符' => [['客户端', '客户端,公开'], false],
+            '只有整段' => [['客户端,公开'], true],
+            '客户端重复' => [['客户端', '客户端'], false],
+            '非字符串共存' => [['客户端', null, 6, '公开'], true],
+        ];
+    }
+
+    private function makeFixedGroup(int $id): ServerGroup
+    {
+        $group = new ServerGroup();
+        $group->id = $id;
+        $group->name = 'HTTP测试组-' . $id;
+        $group->save();
+        return $group;
+    }
+
     private function makeGroup(): ServerGroup
     {
         $group = new ServerGroup();
@@ -453,7 +583,7 @@ class ClientOnlyNodesTest extends TestCase
     private function subscribe(User $user, string $flag, array $headers = [], array $parameters = [])
     {
         $query = http_build_query(array_merge(['token' => $user->token, 'flag' => $flag], $parameters));
-        return $this->get('/api/v1/client/subscribe?' . $query, $headers);
+        return $this->get('/api/v1/client/subscribe?' . $query, array_merge(['Accept' => 'application/json'], $headers));
     }
 
     // 按出现顺序取订阅配置里的节点地址：Clash Meta 读节点列表，其余格式解出 base64 后逐行取 @ 后面的主机
